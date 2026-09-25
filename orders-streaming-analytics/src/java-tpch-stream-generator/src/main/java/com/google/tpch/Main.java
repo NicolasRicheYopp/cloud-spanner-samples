@@ -278,13 +278,13 @@ public final class Main implements Callable<Integer> {
 
                 if (configuration.dateFrom() != null && configuration.dateTo() != null) {
                     if (configuration.rebaseDates()) {
-                        // Project TPC-H epoch progress linearly into [dateFrom, dateTo]
-                        long targetSpanDays = configuration.dateTo().toEpochDay() - configuration.dateFrom().toEpochDay();
-                        double progress = (double) (order.orderDate() - TPCH_MIN_EPOCH) / TPCH_SPAN_DAYS;
-                        long rebasedEpochDay = configuration.dateFrom().toEpochDay() + (long) (progress * targetSpanDays);
+                    // Project TPC-H epoch progress linearly into [dateFrom, dateTo]
+                    long targetSpanDays = configuration.dateTo().toEpochDay() - configuration.dateFrom().toEpochDay();
+                    double progress = (double) (order.orderDate() - TPCH_MIN_EPOCH) / TPCH_SPAN_DAYS;
+                    long rebasedEpochDay = configuration.dateFrom().toEpochDay() + (long) (progress * targetSpanDays);
 
-                        LocalDate rebasedDate = LocalDate.ofEpochDay(rebasedEpochDay);
-                        recordPayload = replaceOrderDateInPayload(recordPayload, rebasedDate);
+                    LocalDate rebasedDate = LocalDate.ofEpochDay(rebasedEpochDay);
+                    recordPayload = replaceOrderDateInPayload(recordPayload, rebasedDate);
                     } else {
                         // Native filtering for dates within 1992-1998
                         if (originalOrderDate.isBefore(configuration.dateFrom()) ||
@@ -294,10 +294,17 @@ public final class Main implements Callable<Integer> {
                     }
                 }
 
+                // Bit-reverse the sequential orderKey to prevent write hotspots in distributed targets
+                long distributedOrderKey = bitReverse(order.orderKey());
+
+                // Replace O_ORDERKEY (field 0) in the pipe-delimited payload
+                recordPayload = replaceOrderKeyInPayload(recordPayload, distributedOrderKey);
+
+
                 ProducerRecord<String, String> record =
                     new ProducerRecord<>(
                         configuration.topic(),
-                        String.valueOf(order.orderKey()),
+                        String.valueOf(distributedOrderKey),
                         recordPayload
                     );
 
@@ -344,6 +351,22 @@ public final class Main implements Callable<Integer> {
                 actualThroughput
             );
         }
+    }
+
+    /**
+     * Bit-reverses a 64-bit integer while preserving it as a strictly positive number (> 0).
+     * This mimics Cloud Spanner's bit_reversed_positive sequence behavior.
+     */
+    private static long bitReverse(long value) {
+        return Long.reverse(value) >>> 1;
+    }
+
+    private static String replaceOrderKeyInPayload(String rawPayload, long newOrderKey) {
+        String[] fields = rawPayload.split("\\|", -1);
+        if (fields.length > 0) {
+            fields[0] = Long.toString(newOrderKey); // Field index 0 is O_ORDERKEY
+        }
+        return String.join("|", fields);
     }
 
     private static String replaceOrderDateInPayload(String rawPayload, LocalDate newDate) {
